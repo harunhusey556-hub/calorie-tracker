@@ -5,6 +5,9 @@ import { defineConfig, devices } from "@playwright/test";
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
+  // Only 2 spec files; forcing 1 worker avoids a cross-file SW-registration
+  // race (both files hit the same origin) at zero real throughput cost.
+  workers: 1,
   retries: process.env.CI ? 2 : 0,
   reporter: "list",
   use: {
