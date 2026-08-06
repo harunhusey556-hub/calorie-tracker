@@ -18,10 +18,19 @@ test.describe("offline app shell (BUG-07)", () => {
     await expect(page).toHaveTitle(/Calories/i);
     await expect(page.getByRole("heading", { name: "Today" })).toBeVisible();
 
+    // `ServiceWorkerRegistration.active` is truthy for BOTH the "activating"
+    // and "activated" states — the flake (~1/8 runs, QA PATCH_QA round 2)
+    // was this resolving mid-"activating", i.e. while the activate handler's
+    // clients.claim() (public/sw.js) was still in flight. The reload() right
+    // after then raced clients.claim() finishing, so the new navigation
+    // sometimes wasn't assigned a controller within the 10s budget. Pinning
+    // this wait to the terminal "activated" state means clients.claim() has
+    // already resolved before we reload, making the controller handoff
+    // deterministic.
     await page.waitForFunction(
       async () => {
         const reg = await navigator.serviceWorker.getRegistration();
-        return !!reg?.active;
+        return reg?.active?.state === "activated";
       },
       undefined,
       { timeout: 10_000 }
