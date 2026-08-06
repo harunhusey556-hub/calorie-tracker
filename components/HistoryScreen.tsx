@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useMotionValue, useTransform, animate } from "framer-motion";
-import { getAllMeals, deleteMeal, mealsProtein, type Meal } from "@/lib/db";
+import { getAllMeals, deleteMeal, addMeal, mealsProtein, type Meal } from "@/lib/db";
 
 function dayLabel(ts: number) {
   const d = new Date(ts);
@@ -20,10 +20,36 @@ function mealProtein(meal: Meal): number {
   return Math.round(meal.items.reduce((sum, item) => sum + item.protein_g, 0) * 10) / 10;
 }
 
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+      <path
+        d="M5 7h14M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m1 0-.7 12.1A2 2 0 0 1 15.3 21H8.7a2 2 0 0 1-2-1.9L6 7"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function SwipeableMeal({ meal, onDelete }: { meal: Meal; onDelete: (id: number) => void }) {
   const x = useMotionValue(0);
   const deleteOpacity = useTransform(x, [-80, -20, 0], [1, 0.4, 0]);
   const [removing, setRemoving] = useState(false);
+
+  // Shared by the swipe gesture and the explicit delete button below — swipe
+  // alone has no confirm step and isn't reachable without touch, so the
+  // button gives keyboard/screen-reader users (and anyone who doesn't want
+  // to trust an accidental swipe) an equivalent, testable path to the same
+  // BUG-06 delete flow.
+  function triggerDelete() {
+    if (meal.id === undefined) return;
+    setRemoving(true);
+    const id = meal.id;
+    setTimeout(() => onDelete(id), 180);
+  }
 
   return (
     <motion.div
@@ -47,9 +73,7 @@ function SwipeableMeal({ meal, onDelete }: { meal: Meal; onDelete: (id: number) 
         style={{ x }}
         onDragEnd={(_, info) => {
           if (info.offset.x < -70 && meal.id !== undefined) {
-            setRemoving(true);
-            const id = meal.id;
-            setTimeout(() => onDelete(id), 180);
+            triggerDelete();
           } else {
             animate(x, 0, { type: "spring", stiffness: 400, damping: 30 });
           }
@@ -72,19 +96,56 @@ function SwipeableMeal({ meal, onDelete }: { meal: Meal; onDelete: (id: number) 
             )}
           </div>
         </div>
-        <span className="ml-3 shrink-0 text-right text-sm font-medium tabular-nums text-neutral-300">
-          {meal.total_calories} kcal
-          <span className="block text-xs font-normal text-neutral-500">{mealProtein(meal)}g protein</span>
-        </span>
+        <div className="ml-3 flex shrink-0 items-center gap-2">
+          <span className="text-right text-sm font-medium tabular-nums text-neutral-300">
+            {meal.total_calories} kcal
+            <span className="block text-xs font-normal text-neutral-500">{mealProtein(meal)}g protein</span>
+          </span>
+          <button
+            type="button"
+            aria-label={`Delete ${meal.text}`}
+            data-testid={meal.id !== undefined ? `delete-meal-${meal.id}` : undefined}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              triggerDelete();
+            }}
+            className="rounded-full p-1.5 text-neutral-600 transition-colors active:text-red-400"
+          >
+            <TrashIcon />
+          </button>
+        </div>
       </motion.div>
     </motion.div>
   );
+}
+
+const UNDO_WINDOW_MS = 5000;
+const DELETE_ERROR_MS = 4000;
+
+function sortByTimestampDesc(list: Meal[]): Meal[] {
+  return [...list].sort((a, b) => b.timestamp - a.timestamp);
 }
 
 export default function HistoryScreen({ refreshKey }: { refreshKey: number }) {
   const [meals, setMeals] = useState<Meal[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Deleted meal kept around for the undo window — deleteMeal() already
+  // removed it from Dexie by the time this is set, so undo re-inserts via
+  // addMeal() rather than reverting a not-yet-committed delete.
+  const [pendingUndo, setPendingUndo] = useState<Meal | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const deleteErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+      if (deleteErrorTimerRef.current) clearTimeout(deleteErrorTimerRef.current);
+    },
+    []
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -109,8 +170,41 @@ export default function HistoryScreen({ refreshKey }: { refreshKey: number }) {
   }, [refreshKey]);
 
   async function handleDelete(id: number) {
+    const meal = meals.find((m) => m.id === id);
     setMeals((prev) => prev.filter((m) => m.id !== id));
-    await deleteMeal(id);
+    try {
+      await deleteMeal(id);
+      // A second delete before the first undo window closes shouldn't lose
+      // the earlier undo silently — commit is already done for both, so
+      // just swap which one the snackbar offers to restore.
+      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+      if (meal) setPendingUndo(meal);
+      undoTimerRef.current = setTimeout(() => setPendingUndo(null), UNDO_WINDOW_MS);
+    } catch {
+      // Delete failed server/DB-side — the optimistic removal above was
+      // wrong, put the row back and tell the user instead of silently
+      // losing it (BUG-06).
+      if (meal) setMeals((prev) => sortByTimestampDesc([...prev, meal]));
+      setDeleteError("Couldn't delete that meal. Try again.");
+      if (deleteErrorTimerRef.current) clearTimeout(deleteErrorTimerRef.current);
+      deleteErrorTimerRef.current = setTimeout(() => setDeleteError(null), DELETE_ERROR_MS);
+    }
+  }
+
+  async function handleUndo() {
+    if (!pendingUndo) return;
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    const { id, ...rest } = pendingUndo;
+    void id; // drop the old id — addMeal assigns a fresh one on re-insert
+    setPendingUndo(null);
+    try {
+      const newId = await addMeal(rest);
+      setMeals((prev) => sortByTimestampDesc([...prev, { ...rest, id: newId }]));
+    } catch {
+      setDeleteError("Couldn't undo. Try deleting again if needed.");
+      if (deleteErrorTimerRef.current) clearTimeout(deleteErrorTimerRef.current);
+      deleteErrorTimerRef.current = setTimeout(() => setDeleteError(null), DELETE_ERROR_MS);
+    }
   }
 
   const groups: { label: string; meals: Meal[] }[] = [];
@@ -180,6 +274,36 @@ export default function HistoryScreen({ refreshKey }: { refreshKey: number }) {
           ))}
         </div>
       )}
+
+      <AnimatePresence>
+        {deleteError && (
+          <motion.p
+            key="delete-error"
+            role="alert"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-x-5 bottom-24 z-20 rounded-xl bg-red-500/90 px-4 py-3 text-center text-sm font-medium text-white shadow-lg"
+          >
+            {deleteError}
+          </motion.p>
+        )}
+        {!deleteError && pendingUndo && (
+          <motion.div
+            key="undo-snackbar"
+            role="status"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-x-5 bottom-24 z-20 flex items-center justify-between gap-3 rounded-xl bg-neutral-800 px-4 py-3 text-sm text-white shadow-lg"
+          >
+            <span className="truncate">Meal deleted</span>
+            <button type="button" onClick={handleUndo} className="shrink-0 font-semibold text-emerald-400">
+              Undo
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

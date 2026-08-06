@@ -50,13 +50,24 @@ export default function PhotoCapture({
 }) {
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const libraryInputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [notes, setNotes] = useState("");
   const [slowWait, setSlowWait] = useState(false);
+  // BUG-09: decode failures (e.g. HEIC — the default iPhone photo format,
+  // which createImageBitmap can't handle in most browsers even though
+  // accept="image/*" lets the file through the picker) happen client-side,
+  // before any network request. Routing them through the same "check your
+  // connection" copy the network-error path uses is misleading, so they get
+  // their own local message instead of going through onError().
+  const [localError, setLocalError] = useState<string | null>(null);
 
-  // The free-tier vision model can take up to ~75s under load — swap the
-  // spinner copy after a while so a long wait doesn't read as frozen.
+  useEffect(() => () => abortControllerRef.current?.abort(), []);
+
+  // The vision model chain (primary -> fallback, ~12s/stage) can take up to
+  // ~24s worst case — swap the spinner copy after a while so a long wait
+  // doesn't read as frozen.
   useEffect(() => {
     if (!loading) {
       setSlowWait(false);
@@ -72,25 +83,58 @@ export default function PhotoCapture({
     if (libraryInputRef.current) libraryInputRef.current.value = "";
   }
 
+  function handleCancel() {
+    abortControllerRef.current?.abort();
+  }
+
   async function handleFile(file: File | undefined) {
     if (!file) return;
+    setLocalError(null);
     setLoading(true);
     onLoadingChange?.(true);
-    try {
-      const { blob, dataUrl } = await resizeImageFile(file);
-      setPreviewUrl(dataUrl);
 
+    // Decode/resize happens entirely client-side (canvas + createImageBitmap)
+    // before anything touches the network — keep its failure path separate
+    // from the fetch below so a bad file (e.g. unsupported HEIC) doesn't get
+    // mislabeled as a connection problem.
+    let blob: Blob;
+    let dataUrl: string;
+    try {
+      ({ blob, dataUrl } = await resizeImageFile(file));
+    } catch {
+      setLoading(false);
+      onLoadingChange?.(false);
+      reset();
+      setLocalError(
+        "Couldn't open that photo — it may be an unsupported format (e.g. HEIC). Try a different photo, or take a new one."
+      );
+      return;
+    }
+    setPreviewUrl(dataUrl);
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    try {
       const formData = new FormData();
       formData.append("photo", blob, "meal.jpg");
       if (notes.trim()) formData.append("notes", notes.trim());
-      const res = await fetch("/api/parse-photo", { method: "POST", body: formData });
+      const res = await fetch("/api/parse-photo", {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      });
       if (!res.ok) throw new Error(`parse-photo failed: ${res.status}`);
       const data: PhotoParseResult = await res.json();
       onResult(data);
-    } catch {
+    } catch (err) {
       reset();
-      onError();
+      // A user-initiated cancel isn't an error — just go back to the
+      // picker silently instead of showing a connection-error message.
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        onError();
+      }
     } finally {
+      abortControllerRef.current = null;
       setLoading(false);
       onLoadingChange?.(false);
     }
@@ -119,11 +163,17 @@ export default function PhotoCapture({
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={previewUrl} alt="Meal photo" className="aspect-[4/3] w-full object-cover" />
           {loading && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/65 backdrop-blur-sm px-6 text-center">
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/65 backdrop-blur-sm px-6 text-center">
               <span className="h-6 w-6 animate-spin rounded-full border-2 border-white/30 border-t-white" />
               <span className="text-sm font-medium text-white">
                 {slowWait ? "Still working — can take up to a minute…" : "Identifying…"}
               </span>
+              <button
+                onClick={handleCancel}
+                className="mt-1 rounded-full border border-white/25 px-4 py-1.5 text-xs font-medium text-white transition-colors active:bg-white/10"
+              >
+                Cancel
+              </button>
             </div>
           )}
           {!loading && (
@@ -137,6 +187,11 @@ export default function PhotoCapture({
         </div>
       ) : (
         <div className="flex flex-col gap-3">
+          {localError && (
+            <p role="alert" className="rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-300">
+              {localError}
+            </p>
+          )}
           <input
             type="text"
             value={notes}
