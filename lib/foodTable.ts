@@ -1,5 +1,5 @@
-// Static fallback calorie/macro table — used when GROQ_API_KEY is missing or the
-// Groq call fails. Values are per typical single serving (not per 100g) so the
+// Static fallback calorie/macro table — used when NVIDIA_API_KEY is missing or the
+// NVIDIA call fails. Values are per typical single serving (not per 100g) so the
 // fallback matcher can return numbers directly without unit conversion.
 // Sources: USDA FoodData Central averages, rounded for simplicity.
 
@@ -70,7 +70,7 @@ export const FOOD_TABLE: FoodEntry[] = [
 /**
  * Very small best-effort matcher: lowercases + strips punctuation, then looks
  * for a table entry whose name/alias is contained in (or contains) the query
- * token. Not a tokenizer/NLP pass — the Groq path handles real parsing; this
+ * token. Not a tokenizer/NLP pass — the NVIDIA path handles real parsing; this
  * is only the safety net when AI parsing is unavailable.
  */
 export function findFoodMatch(query: string): FoodEntry | null {

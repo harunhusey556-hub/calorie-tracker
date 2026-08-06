@@ -2,7 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { getMealsForDay, getTotalCaloriesForDay, getDailyGoal, type Meal } from "@/lib/db";
+import {
+  getMealsForDay,
+  getTotalCaloriesForDay,
+  getDailyGoal,
+  mealsProtein,
+  type Meal,
+} from "@/lib/db";
 import CalorieRing from "./CalorieRing";
 
 export default function TodayScreen({ refreshKey }: { refreshKey: number }) {
@@ -46,7 +52,10 @@ export default function TodayScreen({ refreshKey }: { refreshKey: number }) {
       <div className="w-full">
         <h1 className="text-2xl font-semibold text-white">Today</h1>
         <p className="mt-1 text-sm text-neutral-400">
-          {new Date().toLocaleDateString(undefined, {
+          {/* Fixed locale — server and client can run under different default
+              locales, and a locale-dependent string rendered on first paint
+              causes a hydration mismatch. */}
+          {new Date().toLocaleDateString("en-US", {
             weekday: "long",
             month: "long",
             day: "numeric",
@@ -65,8 +74,12 @@ export default function TodayScreen({ refreshKey }: { refreshKey: number }) {
           initial={{ opacity: 0, scale: 0.94 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ type: "spring", stiffness: 200, damping: 22 }}
+          className="flex flex-col items-center gap-3"
         >
           <CalorieRing consumed={total} goal={goal} />
+          <p className="text-sm font-medium text-neutral-400">
+            <span className="text-white">{mealsProtein(meals)}g</span> protein today
+          </p>
         </motion.div>
       )}
 

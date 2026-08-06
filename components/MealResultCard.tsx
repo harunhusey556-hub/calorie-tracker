@@ -3,7 +3,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import type { MealItem } from "@/lib/db";
 
-export type MealSource = "groq" | "groq-vision" | "fallback";
+export type MealSource = "nvidia" | "nvidia-vision" | "fallback";
 
 /**
  * Confirm-and-save card, shared by text parsing and photo parsing — one
@@ -48,14 +48,22 @@ export default function MealResultCard({
               {item.qty > 1 ? `${item.qty}× ` : ""}
               {item.name}
             </span>
-            <span className="text-sm tabular-nums text-neutral-400">{item.calories} kcal</span>
+            <span className="text-right text-sm tabular-nums text-neutral-400">
+              {item.calories} kcal
+              <span className="ml-2 text-neutral-500">{item.protein_g}g protein</span>
+            </span>
           </li>
         ))}
       </ul>
 
       <div className="flex items-center justify-between border-t border-neutral-800 pt-3">
         <span className="text-sm font-medium text-neutral-300">Total</span>
-        <span className="text-lg font-semibold tabular-nums text-white">{totalCalories} kcal</span>
+        <span className="text-right">
+          <span className="text-lg font-semibold tabular-nums text-white">{totalCalories} kcal</span>
+          <span className="block text-xs tabular-nums text-neutral-500">
+            {items.reduce((sum, item) => sum + item.protein_g, 0).toFixed(1)}g protein
+          </span>
+        </span>
       </div>
 
       <motion.button

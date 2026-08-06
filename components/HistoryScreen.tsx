@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion, useMotionValue, useTransform, animate } from "framer-motion";
-import { getAllMeals, deleteMeal, type Meal } from "@/lib/db";
+import { getAllMeals, deleteMeal, mealsProtein, type Meal } from "@/lib/db";
 
 function dayLabel(ts: number) {
   const d = new Date(ts);
@@ -13,7 +13,11 @@ function dayLabel(ts: number) {
     a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
   if (sameDay(d, today)) return "Today";
   if (sameDay(d, yest)) return "Yesterday";
-  return d.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+  return d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+}
+
+function mealProtein(meal: Meal): number {
+  return Math.round(meal.items.reduce((sum, item) => sum + item.protein_g, 0) * 10) / 10;
 }
 
 function SwipeableMeal({ meal, onDelete }: { meal: Meal; onDelete: (id: number) => void }) {
@@ -56,7 +60,7 @@ function SwipeableMeal({ meal, onDelete }: { meal: Meal; onDelete: (id: number) 
           <p className="truncate text-sm text-white">{meal.text}</p>
           <div className="mt-0.5 flex items-center gap-1.5 text-xs text-neutral-500">
             <span>
-              {new Date(meal.timestamp).toLocaleTimeString(undefined, {
+              {new Date(meal.timestamp).toLocaleTimeString("en-US", {
                 hour: "numeric",
                 minute: "2-digit",
               })}
@@ -68,8 +72,9 @@ function SwipeableMeal({ meal, onDelete }: { meal: Meal; onDelete: (id: number) 
             )}
           </div>
         </div>
-        <span className="ml-3 shrink-0 text-sm font-medium tabular-nums text-neutral-300">
+        <span className="ml-3 shrink-0 text-right text-sm font-medium tabular-nums text-neutral-300">
           {meal.total_calories} kcal
+          <span className="block text-xs font-normal text-neutral-500">{mealProtein(meal)}g protein</span>
         </span>
       </motion.div>
     </motion.div>
@@ -155,9 +160,15 @@ export default function HistoryScreen({ refreshKey }: { refreshKey: number }) {
         <div className="flex flex-col gap-5">
           {groups.map((group) => (
             <div key={group.label}>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-500">
-                {group.label}
-              </p>
+              <div className="mb-2 flex items-baseline justify-between">
+                <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                  {group.label}
+                </p>
+                <p className="text-xs tabular-nums text-neutral-600">
+                  {group.meals.reduce((sum, m) => sum + m.total_calories, 0)} kcal ·{" "}
+                  {mealsProtein(group.meals)}g protein
+                </p>
+              </div>
               <div className="flex flex-col gap-2">
                 <AnimatePresence initial={false}>
                   {group.meals.map((meal) => (

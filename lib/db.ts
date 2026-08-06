@@ -14,7 +14,7 @@ export interface Meal {
   text: string; // raw text the user typed
   items: MealItem[]; // parsed items from /api/parse-meal
   total_calories: number;
-  source: "groq" | "fallback";
+  source: "nvidia" | "fallback";
   timestamp: number; // Date.now() at log time
 }
 
@@ -75,6 +75,21 @@ export async function getMealsForDay(date: Date = new Date()): Promise<Meal[]> {
 export async function getTotalCaloriesForDay(date: Date = new Date()): Promise<number> {
   const meals = await getMealsForDay(date);
   return meals.reduce((sum, m) => sum + m.total_calories, 0);
+}
+
+/** Sum of protein (g) for a given day (defaults to today). Derived from item-level protein_g since meals don't store a rolled-up total. */
+export async function getTotalProteinForDay(date: Date = new Date()): Promise<number> {
+  const meals = await getMealsForDay(date);
+  return mealsProtein(meals);
+}
+
+/** Sum of protein (g) across a set of meals, rounded to 1 decimal. */
+export function mealsProtein(meals: Meal[]): number {
+  const total = meals.reduce(
+    (sum, m) => sum + m.items.reduce((s, item) => s + item.protein_g, 0),
+    0
+  );
+  return Math.round(total * 10) / 10;
 }
 
 /** Get the user's daily calorie goal (defaults to 2000 if never set). */

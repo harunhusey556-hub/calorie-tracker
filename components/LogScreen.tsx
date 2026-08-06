@@ -79,9 +79,9 @@ export default function LogScreen({ onSaved }: { onSaved: () => void }) {
       text: summary,
       items: result.items,
       total_calories: result.total_calories,
-      // Photo results carry "groq-vision"; the local schema only tracks
-      // AI-success vs. fallback, so normalize to the existing "groq" bucket.
-      source: result.source === "fallback" ? "fallback" : "groq",
+      // Photo results carry "nvidia-vision"; the local schema only tracks
+      // AI-success vs. fallback, so normalize to the existing "nvidia" bucket.
+      source: result.source === "fallback" ? "fallback" : "nvidia",
       timestamp: Date.now(),
     });
     setSaved(true);

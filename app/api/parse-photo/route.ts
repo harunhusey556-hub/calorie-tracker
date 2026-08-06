@@ -1,20 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
-import { findFoodMatch } from "@/lib/foodTable";
 
 export const runtime = "nodejs";
 
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL_PRIMARY = "llama-3.2-90b-vision-preview";
-const GROQ_MODEL_FALLBACK = "llama-3.2-11b-vision-preview";
+const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+// NVIDIA NIM only exposes one vision-capable chat model right now — retry
+// this same model once on transient failure instead of a second model.
+const NVIDIA_MODEL_VISION = "meta/llama-3.2-90b-vision-instruct";
 
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024; // 8MB — client resizes to ~1024px per contract, this is a safety cap
 const ACCEPTED_MIME = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
 
-const SYSTEM_PROMPT = `You are a nutrition parser looking at a photo of food. Identify each distinct
-food item visible and estimate a realistic portion + calories/macros for a typical serving of what you see.
+const SYSTEM_PROMPT = `You are a nutrition parser looking at a photo of food on a plate. For each item,
+judge its actual weight in grams from visual cues (plate ~26-28cm, utensil size, portion
+coverage/height) — do NOT default to a generic textbook 100g/single-serving number; scale up for
+portions bigger than a normal serving. Compute calories/macros for the weight you actually see.
 Respond with ONLY valid JSON (no markdown, no commentary) matching exactly this shape:
 {"items":[{"name":"string","qty":number,"calories":number,"protein_g":number,"carbs_g":number,"fat_g":number}],"total_calories":number}
-"qty" is the count of that item (default 1). "total_calories" is the sum of all items' calories, rounded to an integer.
+"qty" is the count of discrete units (e.g. 3 eggs, 4 fries) — default to 1 for anything continuous
+(rice, a chicken breast, a scoop of potatoes) and bake the estimated weight into calories instead
+of inflating qty. "total_calories" is the sum of all items' calories, rounded to an integer.
 All numeric fields are numbers, not strings. Keep item names short and singular (e.g. "egg" not "eggs").
 If you cannot identify any food in the image, respond with {"items":[],"total_calories":0}.`;
 
@@ -30,10 +34,10 @@ export interface PhotoParsedItem {
 export interface PhotoParseResult {
   items: PhotoParsedItem[];
   total_calories: number;
-  source: "groq-vision" | "fallback";
+  source: "nvidia-vision" | "fallback";
 }
 
-interface GroqItem {
+interface NvidiaItem {
   name?: unknown;
   qty?: unknown;
   calories?: unknown;
@@ -44,6 +48,19 @@ interface GroqItem {
 
 function isFiniteNumber(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
+}
+
+// NVIDIA NIM doesn't reliably honor response_format: json_object for this
+// model (it's slow and occasionally emits malformed JSON under that mode),
+// so we ask for plain JSON in the prompt and strip any markdown fence /
+// stray prose the model still wraps around it.
+function extractJsonObject(content: string): string {
+  const fenced = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const body = fenced ? fenced[1] : content;
+  const start = body.indexOf("{");
+  const end = body.lastIndexOf("}");
+  if (start === -1 || end === -1 || end < start) return body.trim();
+  return body.slice(start, end + 1);
 }
 
 // Generic "couldn't identify" item per contract — never a dead end, UI drops
@@ -67,12 +84,12 @@ function fallbackPhotoResult(): PhotoParseResult {
 
 // Validate + coerce the model's JSON into our strict shape. Throws on anything
 // that doesn't look like real parsed data so the caller falls back safely.
-function coerceGroqResult(raw: unknown): { items: PhotoParsedItem[]; total_calories: number } {
+function coerceNvidiaResult(raw: unknown): { items: PhotoParsedItem[]; total_calories: number } {
   if (!raw || typeof raw !== "object") throw new Error("not an object");
   const obj = raw as { items?: unknown; total_calories?: unknown };
   if (!Array.isArray(obj.items)) throw new Error("items missing");
 
-  const items = obj.items.map((entry: GroqItem) => {
+  const items = obj.items.map((entry: NvidiaItem) => {
     if (typeof entry.name !== "string" || !entry.name.trim()) {
       throw new Error("item missing name");
     }
@@ -91,34 +108,21 @@ function coerceGroqResult(raw: unknown): { items: PhotoParsedItem[]; total_calor
   return { items, total_calories };
 }
 
-// Re-price model-estimated items against the static food table where a match
-// exists, same as the text-parse route trusts the local table over an AI
-// guess whenever we have real data for that food.
-function refineWithFoodTable(items: PhotoParsedItem[]): PhotoParsedItem[] {
-  return items.map((item) => {
-    const match = findFoodMatch(item.name);
-    if (!match) return item;
-    return {
-      name: match.name,
-      qty: item.qty,
-      calories: Math.round(match.calories * item.qty),
-      protein_g: Math.round(match.protein_g * item.qty * 10) / 10,
-      carbs_g: Math.round(match.carbs_g * item.qty * 10) / 10,
-      fat_g: Math.round(match.fat_g * item.qty * 10) / 10,
-    };
-  });
-}
-
-async function callGroqVision(
+async function callNvidiaVision(
   model: string,
   dataUrl: string,
-  apiKey: string
+  apiKey: string,
+  notes: string
 ): Promise<{ items: PhotoParsedItem[]; total_calories: number }> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const timeout = setTimeout(() => controller.abort(), 90_000);
+
+  const promptText = notes
+    ? `${SYSTEM_PROMPT}\n\nThe user gave this exact context — trust it over your own guess where it conflicts with what you see (correcting an ingredient, naming a packaged product, etc). If they state a weight (e.g. "200g chicken breast"), that weight is ALREADY EXACT — don't apply any "scale up, don't lowball" bias on top of it, just use standard nutrition density for that food and multiply by the stated grams (e.g. cooked chicken breast ≈150-165 kcal/100g, cooked pasta ≈130-160 kcal/100g, rice ≈130 kcal/100g cooked, sauces vary but rarely exceed 150-250 kcal/100g unless it's pure oil/cream). Set "qty" to 1 for that item since the weight is already baked into the numbers: "${notes}"`
+    : SYSTEM_PROMPT;
 
   try {
-    const res = await fetch(GROQ_URL, {
+    const res = await fetch(NVIDIA_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -130,52 +134,66 @@ async function callGroqVision(
           {
             role: "user",
             content: [
-              { type: "text", text: SYSTEM_PROMPT },
+              { type: "text", text: promptText },
               { type: "image_url", image_url: { url: dataUrl } },
             ],
           },
         ],
         temperature: 0.2,
-        response_format: { type: "json_object" },
       }),
       signal: controller.signal,
     });
 
     if (!res.ok) {
-      throw new Error(`groq http ${res.status}`);
+      throw new Error(`nvidia http ${res.status}`);
     }
 
     const data = await res.json();
     const content = data?.choices?.[0]?.message?.content;
-    if (typeof content !== "string") throw new Error("no content in groq response");
+    if (typeof content !== "string") throw new Error("no content in nvidia response");
 
-    const parsedJson = JSON.parse(content);
-    return coerceGroqResult(parsedJson);
+    const parsedJson = JSON.parse(extractJsonObject(content));
+    return coerceNvidiaResult(parsedJson);
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function parsePhotoWithGroq(dataUrl: string, apiKey: string): Promise<PhotoParseResult> {
+async function parsePhotoWithNvidia(dataUrl: string, apiKey: string, notes: string): Promise<PhotoParseResult> {
+  // NVIDIA's free-tier vision model has wide latency variance (observed
+  // 16-55s+) plus occasional quick 503s under load. A fast failure (HTTP
+  // error, bad JSON) is worth one retry — it costs almost nothing and often
+  // lands on a less-loaded worker. A timeout on a 75s budget almost
+  // certainly means the same thing will happen again, so we don't burn a
+  // second 75s window retrying those.
   try {
-    const result = await callGroqVision(GROQ_MODEL_PRIMARY, dataUrl, apiKey);
-    return finalizeGroqResult(result);
+    const result = await callNvidiaVision(NVIDIA_MODEL_VISION, dataUrl, apiKey, notes);
+    return finalizeNvidiaResult(result);
   } catch (err) {
-    console.error(`[parse-photo] ${GROQ_MODEL_PRIMARY} failed, trying fallback model:`, err);
+    const isTimeout = err instanceof DOMException && err.name === "AbortError";
+    if (isTimeout) throw err;
+    console.error(`[parse-photo] ${NVIDIA_MODEL_VISION} failed fast, retrying once:`, err);
   }
 
-  const result = await callGroqVision(GROQ_MODEL_FALLBACK, dataUrl, apiKey);
-  return finalizeGroqResult(result);
+  const result = await callNvidiaVision(NVIDIA_MODEL_VISION, dataUrl, apiKey, notes);
+  return finalizeNvidiaResult(result);
 }
 
-function finalizeGroqResult(result: { items: PhotoParsedItem[]; total_calories: number }): PhotoParseResult {
+function finalizeNvidiaResult(result: { items: PhotoParsedItem[]; total_calories: number }): PhotoParseResult {
   if (result.items.length === 0) {
     // Model ran fine but saw no food — same "couldn't identify" UX as a hard failure.
     return fallbackPhotoResult();
   }
-  const items = refineWithFoodTable(result.items);
+  // Trust the model's own calorie/macro estimate directly — it already saw
+  // the actual portion in the photo (and any gram amounts in user notes).
+  // A prior version re-priced matches against the static FOOD_TABLE, which
+  // only stores one fixed default serving per food (e.g. "chicken breast"
+  // = 165 kcal/100g) and silently overwrote a real 200g/400g estimate with
+  // that single fixed value, undercounting badly for any portion that
+  // wasn't exactly the table's default size.
+  const items = result.items;
   const total_calories = items.reduce((sum, i) => sum + i.calories, 0);
-  return { items, total_calories, source: "groq-vision" };
+  return { items, total_calories, source: "nvidia-vision" };
 }
 
 export async function POST(req: NextRequest) {
@@ -201,18 +219,24 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `unsupported image type '${mimeType}'` }, { status: 400 });
   }
 
-  const apiKey = process.env.GROQ_API_KEY;
+  // Optional free-text hint from the user — e.g. correcting an ingredient
+  // the model tends to misread ("that's mustard, not cheese") or adding
+  // portion info the photo alone can't convey.
+  const notesRaw = form.get("notes");
+  const notes = typeof notesRaw === "string" ? notesRaw.trim().slice(0, 300) : "";
+
+  const apiKey = process.env.NVIDIA_API_KEY;
 
   if (apiKey) {
     try {
       const buffer = Buffer.from(await photo.arrayBuffer());
       const dataUrl = `data:${mimeType};base64,${buffer.toString("base64")}`;
-      const result = await parsePhotoWithGroq(dataUrl, apiKey);
+      const result = await parsePhotoWithNvidia(dataUrl, apiKey, notes);
       return NextResponse.json(result);
     } catch (err) {
-      // Vision call failure (both models) must never 500 the request — fall
+      // Vision call failure (both attempts) must never 500 the request — fall
       // through to the generic fallback below per contract.
-      console.error("[parse-photo] Groq vision call failed, using fallback:", err);
+      console.error("[parse-photo] NVIDIA vision call failed, using fallback:", err);
     }
   }
 

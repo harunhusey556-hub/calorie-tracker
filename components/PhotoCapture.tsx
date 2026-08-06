@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { resizeImageFile } from "@/lib/resizeImage";
 import type { MealItem } from "@/lib/db";
@@ -8,7 +8,7 @@ import type { MealItem } from "@/lib/db";
 export type PhotoParseResult = {
   items: MealItem[];
   total_calories: number;
-  source: "groq-vision" | "fallback";
+  source: "nvidia-vision" | "fallback";
 };
 
 function CameraIcon() {
@@ -52,6 +52,19 @@ export default function PhotoCapture({
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [notes, setNotes] = useState("");
+  const [slowWait, setSlowWait] = useState(false);
+
+  // The free-tier vision model can take up to ~75s under load — swap the
+  // spinner copy after a while so a long wait doesn't read as frozen.
+  useEffect(() => {
+    if (!loading) {
+      setSlowWait(false);
+      return;
+    }
+    const t = setTimeout(() => setSlowWait(true), 12_000);
+    return () => clearTimeout(t);
+  }, [loading]);
 
   function reset() {
     setPreviewUrl(null);
@@ -69,6 +82,7 @@ export default function PhotoCapture({
 
       const formData = new FormData();
       formData.append("photo", blob, "meal.jpg");
+      if (notes.trim()) formData.append("notes", notes.trim());
       const res = await fetch("/api/parse-photo", { method: "POST", body: formData });
       if (!res.ok) throw new Error(`parse-photo failed: ${res.status}`);
       const data: PhotoParseResult = await res.json();
@@ -105,9 +119,11 @@ export default function PhotoCapture({
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={previewUrl} alt="Meal photo" className="aspect-[4/3] w-full object-cover" />
           {loading && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/65 backdrop-blur-sm">
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/65 backdrop-blur-sm px-6 text-center">
               <span className="h-6 w-6 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-              <span className="text-sm font-medium text-white">Identifying…</span>
+              <span className="text-sm font-medium text-white">
+                {slowWait ? "Still working — can take up to a minute…" : "Identifying…"}
+              </span>
             </div>
           )}
           {!loading && (
@@ -121,6 +137,13 @@ export default function PhotoCapture({
         </div>
       ) : (
         <div className="flex flex-col gap-3">
+          <input
+            type="text"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value.slice(0, 300))}
+            placeholder="Add details AI might miss (optional) — e.g. &quot;that's mustard, not cheese&quot;"
+            className="w-full rounded-2xl border border-neutral-800 bg-neutral-900 px-4 py-3 text-[15px] text-white placeholder:text-neutral-500 focus:border-neutral-600 focus:outline-none"
+          />
           <motion.button
             whileTap={{ scale: 0.96 }}
             onClick={() => cameraInputRef.current?.click()}

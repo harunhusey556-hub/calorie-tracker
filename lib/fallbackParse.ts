@@ -12,7 +12,7 @@ export interface ParsedItem {
 export interface ParseResult {
   items: ParsedItem[];
   total_calories: number;
-  source: "groq" | "fallback";
+  source: "nvidia" | "fallback";
 }
 
 const NUMBER_WORDS: Record<string, number> = {
@@ -44,7 +44,7 @@ function extractQty(segment: string): { qty: number; rest: string } {
 }
 
 /**
- * Best-effort local parse used when Groq is unavailable (no key / API error /
+ * Best-effort local parse used when NVIDIA is unavailable (no key / API error /
  * rate limit). Splits the free-text meal description into segments, extracts
  * a quantity per segment, and matches each remaining phrase against the
  * static food table. Unmatched segments are dropped (not guessed) to avoid
