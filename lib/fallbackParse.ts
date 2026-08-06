@@ -27,7 +27,7 @@ const NUMBER_WORDS: Record<string, number> = {
 // BEFORE splitting on commas — "1,5 banana" -> "1.5 banana" (kept as one
 // segment), but "2 eggs, toast" is untouched (comma followed by a space/letter,
 // not a digit) and still splits into two segments. BUG-02.
-function normalizeDecimalCommas(text: string): string {
+export function normalizeDecimalCommas(text: string): string {
   return text.replace(/(\d),(\d)/g, "$1.$2");
 }
 
