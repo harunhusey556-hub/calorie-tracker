@@ -38,14 +38,15 @@ beforeEach(() => {
   process.env.NVIDIA_API_KEY = "test-key";
   delete process.env.NVIDIA_MODEL_TEXT;
   delete process.env.NVIDIA_MODEL_TEXT_FALLBACK;
+  delete process.env.NVIDIA_STAGE_TIMEOUT_MS;
 });
 
 afterEach(() => {
   delete process.env.NVIDIA_API_KEY;
   delete process.env.NVIDIA_MODEL_TEXT;
   delete process.env.NVIDIA_MODEL_TEXT_FALLBACK;
+  delete process.env.NVIDIA_STAGE_TIMEOUT_MS;
   vi.unstubAllGlobals();
-  vi.useRealTimers();
 });
 
 describe("POST /api/parse-meal — model switch chain", () => {
@@ -101,15 +102,16 @@ describe("POST /api/parse-meal — model switch chain", () => {
     expect(fallbackBody.model).toBe("meta/llama-3.3-70b-instruct");
   });
 
-  it("times out the primary stage at ~12s, tries the fallback model, times out at ~12s too, then returns the static table result", async () => {
-    vi.useFakeTimers();
+  it("times out the primary stage, tries the fallback model, times out too, then returns the static table result", async () => {
+    // NVIDIA_STAGE_TIMEOUT_MS shrinks the real ~12s per-stage budget to a
+    // few ms so this exercises the actual AbortSignal.timeout wiring with
+    // real timers, instead of fake-timer bookkeeping around Next's request
+    // body parsing.
+    process.env.NVIDIA_STAGE_TIMEOUT_MS = "20";
     const fetchMock = vi.fn().mockImplementation(abortableNeverResolves());
     vi.stubGlobal("fetch", fetchMock);
 
-    const resultPromise = POST(req({ text: "2 eggs and toast" }));
-    await vi.advanceTimersByTimeAsync(12_000); // primary stage aborts
-    await vi.advanceTimersByTimeAsync(12_000); // fallback stage aborts
-    const res = await resultPromise;
+    const res = await POST(req({ text: "2 eggs and toast" }));
     const data = await res.json();
 
     expect(res.status).toBe(200);
@@ -117,14 +119,15 @@ describe("POST /api/parse-meal — model switch chain", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("does not fire the fallback model's timer early — primary stage alone at 11.9s has not yet aborted", async () => {
-    vi.useFakeTimers();
+  it("does not skip straight to the fallback model while the primary call is still pending", async () => {
+    process.env.NVIDIA_STAGE_TIMEOUT_MS = "500";
     const fetchMock = vi.fn().mockImplementation(abortableNeverResolves());
     vi.stubGlobal("fetch", fetchMock);
 
-    POST(req({ text: "2 eggs" }));
-    await vi.advanceTimersByTimeAsync(11_900);
+    const resultPromise = POST(req({ text: "2 eggs" }));
+    await new Promise((r) => setTimeout(r, 50)); // well before the 500ms abort
     expect(fetchMock).toHaveBeenCalledTimes(1); // still waiting on primary, fallback not started yet
+    await resultPromise; // let the pending request settle before the next test
   });
 });
 

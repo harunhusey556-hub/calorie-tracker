@@ -3,9 +3,26 @@ import { NextRequest, NextResponse } from "next/server";
 export const runtime = "nodejs";
 
 const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
-// NVIDIA NIM only exposes one vision-capable chat model right now — retry
-// this same model once on transient failure instead of a second model.
-const NVIDIA_MODEL_VISION = "meta/llama-3.2-90b-vision-instruct";
+
+// MODEL SWITCH (Doctor, 2026-08-06, live benchmark: model-benchmark-20260806.md).
+// Old model meta/llama-3.2-90b-vision-instruct measured a 30s timeout —
+// vision feature always fell back. New chain: fast nemotron vision primary
+// (0.73s) -> old model demoted to fallback -> manual-entry CTA. Read lazily
+// (not module-level consts) so env changes take effect without a cold
+// restart and tests can override per-case.
+function primaryVisionModel(): string {
+  return process.env.NVIDIA_MODEL_VISION || "nvidia/nemotron-nano-12b-v2-vl";
+}
+function fallbackVisionModel(): string {
+  return process.env.NVIDIA_MODEL_VISION_FALLBACK || "meta/llama-3.2-90b-vision-instruct";
+}
+// Per-stage budget, not total — primary+fallback can take up to ~24s worst
+// case. Overridable so tests can exercise the timeout path in milliseconds
+// instead of juggling fake timers around Next's multipart body parsing.
+function stageTimeoutMs(): number {
+  const override = Number(process.env.NVIDIA_STAGE_TIMEOUT_MS);
+  return Number.isFinite(override) && override > 0 ? override : 12_000;
+}
 
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024; // 8MB — client resizes to ~1024px per contract, this is a safety cap
 const ACCEPTED_MIME = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
@@ -50,6 +67,15 @@ function isFiniteNumber(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
 }
 
+// BUG-05: model JSON was trusted unclamped — same gap as parse-meal. Clamp
+// to a generously sane per-item range.
+function clamp(v: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, v));
+}
+const MAX_ITEM_QTY = 100;
+const MAX_ITEM_CALORIES = 5000;
+const MAX_ITEM_GRAMS = 500;
+
 // NVIDIA NIM doesn't reliably honor response_format: json_object for this
 // model (it's slow and occasionally emits malformed JSON under that mode),
 // so we ask for plain JSON in the prompt and strip any markdown fence /
@@ -93,17 +119,18 @@ function coerceNvidiaResult(raw: unknown): { items: PhotoParsedItem[]; total_cal
     if (typeof entry.name !== "string" || !entry.name.trim()) {
       throw new Error("item missing name");
     }
-    const qty = isFiniteNumber(entry.qty) ? entry.qty : 1;
-    const calories = isFiniteNumber(entry.calories) ? Math.round(entry.calories) : 0;
-    const protein_g = isFiniteNumber(entry.protein_g) ? entry.protein_g : 0;
-    const carbs_g = isFiniteNumber(entry.carbs_g) ? entry.carbs_g : 0;
-    const fat_g = isFiniteNumber(entry.fat_g) ? entry.fat_g : 0;
+    const qty = clamp(isFiniteNumber(entry.qty) ? entry.qty : 1, 0, MAX_ITEM_QTY);
+    const calories = clamp(isFiniteNumber(entry.calories) ? Math.round(entry.calories) : 0, 0, MAX_ITEM_CALORIES);
+    const protein_g = clamp(isFiniteNumber(entry.protein_g) ? entry.protein_g : 0, 0, MAX_ITEM_GRAMS);
+    const carbs_g = clamp(isFiniteNumber(entry.carbs_g) ? entry.carbs_g : 0, 0, MAX_ITEM_GRAMS);
+    const fat_g = clamp(isFiniteNumber(entry.fat_g) ? entry.fat_g : 0, 0, MAX_ITEM_GRAMS);
     return { name: entry.name.trim(), qty, calories, protein_g, carbs_g, fat_g };
   });
 
-  const total_calories = isFiniteNumber(obj.total_calories)
-    ? Math.round(obj.total_calories)
-    : items.reduce((sum, i) => sum + i.calories, 0);
+  // BUG-05: total_calories always recomputed from (clamped) items — never
+  // trust the model's own total field. finalizeNvidiaResult below also
+  // recomputes, kept here too so this function's contract is self-consistent.
+  const total_calories = items.reduce((sum, i) => sum + i.calories, 0);
 
   return { items, total_calories };
 }
@@ -115,7 +142,7 @@ async function callNvidiaVision(
   notes: string
 ): Promise<{ items: PhotoParsedItem[]; total_calories: number }> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 90_000);
+  const timeout = setTimeout(() => controller.abort(), stageTimeoutMs());
 
   const promptText = notes
     ? `${SYSTEM_PROMPT}\n\nThe user gave this exact context — trust it over your own guess where it conflicts with what you see (correcting an ingredient, naming a packaged product, etc). If they state a weight (e.g. "200g chicken breast"), that weight is ALREADY EXACT — don't apply any "scale up, don't lowball" bias on top of it, just use standard nutrition density for that food and multiply by the stated grams (e.g. cooked chicken breast ≈150-165 kcal/100g, cooked pasta ≈130-160 kcal/100g, rice ≈130 kcal/100g cooked, sauces vary but rarely exceed 150-250 kcal/100g unless it's pure oil/cream). Set "qty" to 1 for that item since the weight is already baked into the numbers: "${notes}"`
@@ -159,23 +186,22 @@ async function callNvidiaVision(
   }
 }
 
+// Primary -> fallback vision model chain (~12s budget each, MODEL SWITCH
+// directive). Superseded the old same-model-retry: the old model
+// (llama-3.2-90b-vision) is far slower (30s+) so retrying it never helped;
+// now every failure (timeout or error) moves to a genuinely different,
+// faster model instead of hammering the same one twice. Caller falls
+// through to the manual-entry CTA if both stages fail — never a dead end.
 async function parsePhotoWithNvidia(dataUrl: string, apiKey: string, notes: string): Promise<PhotoParseResult> {
-  // NVIDIA's free-tier vision model has wide latency variance (observed
-  // 16-55s+) plus occasional quick 503s under load. A fast failure (HTTP
-  // error, bad JSON) is worth one retry — it costs almost nothing and often
-  // lands on a less-loaded worker. A timeout on a 75s budget almost
-  // certainly means the same thing will happen again, so we don't burn a
-  // second 75s window retrying those.
+  const primary = primaryVisionModel();
   try {
-    const result = await callNvidiaVision(NVIDIA_MODEL_VISION, dataUrl, apiKey, notes);
+    const result = await callNvidiaVision(primary, dataUrl, apiKey, notes);
     return finalizeNvidiaResult(result);
   } catch (err) {
-    const isTimeout = err instanceof DOMException && err.name === "AbortError";
-    if (isTimeout) throw err;
-    console.error(`[parse-photo] ${NVIDIA_MODEL_VISION} failed fast, retrying once:`, err);
+    console.error(`[parse-photo] primary model ${primary} failed, trying fallback:`, err);
   }
 
-  const result = await callNvidiaVision(NVIDIA_MODEL_VISION, dataUrl, apiKey, notes);
+  const result = await callNvidiaVision(fallbackVisionModel(), dataUrl, apiKey, notes);
   return finalizeNvidiaResult(result);
 }
 

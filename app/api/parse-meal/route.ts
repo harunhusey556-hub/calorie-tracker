@@ -19,8 +19,13 @@ function primaryTextModel(): string {
 function fallbackTextModel(): string {
   return process.env.NVIDIA_MODEL_TEXT_FALLBACK || "meta/llama-3.3-70b-instruct";
 }
-// Per-stage budget, not total — primary+fallback can take up to ~24s worst case.
-const STAGE_TIMEOUT_MS = 12_000;
+// Per-stage budget, not total — primary+fallback can take up to ~24s worst
+// case. Overridable so tests can exercise the timeout path in milliseconds
+// instead of juggling fake timers around Next's request-body parsing.
+function stageTimeoutMs(): number {
+  const override = Number(process.env.NVIDIA_STAGE_TIMEOUT_MS);
+  return Number.isFinite(override) && override > 0 ? override : 12_000;
+}
 
 const SYSTEM_PROMPT = `You are a nutrition parser. Given a free-text description of a meal, break it into
 distinct food items and estimate calories/macros per item using typical serving sizes.
@@ -104,7 +109,7 @@ async function callNvidiaText(
   extraBody?: Record<string, unknown>
 ): Promise<ParseResult> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), STAGE_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), stageTimeoutMs());
 
   try {
     const res = await fetch(NVIDIA_URL, {
