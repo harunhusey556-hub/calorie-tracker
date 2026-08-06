@@ -21,9 +21,19 @@ const NUMBER_WORDS: Record<string, number> = {
   a: 1, an: 1, couple: 2,
 };
 
+// FI locale uses comma as the decimal separator ("1,5" = one and a half),
+// while the same comma is also our list separator ("eggs, toast"). Disambiguate
+// by normalizing only a comma directly between two digits (no space) to a dot
+// BEFORE splitting on commas — "1,5 banana" -> "1.5 banana" (kept as one
+// segment), but "2 eggs, toast" is untouched (comma followed by a space/letter,
+// not a digit) and still splits into two segments. BUG-02.
+function normalizeDecimalCommas(text: string): string {
+  return text.replace(/(\d),(\d)/g, "$1.$2");
+}
+
 // Split "2 eggs, toast and coffee with milk" into ["2 eggs", "toast", "coffee with milk"].
 function splitSegments(text: string): string[] {
-  return text
+  return normalizeDecimalCommas(text)
     .split(/,| and |\+|\n/i)
     .map((s) => s.trim())
     .filter(Boolean);
