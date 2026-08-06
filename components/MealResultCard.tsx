@@ -15,12 +15,17 @@ export default function MealResultCard({
   totalCalories,
   source,
   saved,
+  disabled = false,
   onSave,
 }: {
   items: MealItem[];
   totalCalories: number;
   source: MealSource;
   saved: boolean;
+  // BUG-01: true while a save is in flight (or already saved) — disables the
+  // button at the DOM level so a double-tap can't fire onSave twice, on top
+  // of the parent's own re-entry guard.
+  disabled?: boolean;
   onSave: () => void;
 }) {
   return (
@@ -69,7 +74,8 @@ export default function MealResultCard({
       <motion.button
         whileTap={{ scale: 0.96 }}
         onClick={onSave}
-        className="mt-1 w-full rounded-2xl bg-white py-3 text-[16px] font-semibold text-black transition-colors"
+        disabled={disabled}
+        className="mt-1 w-full rounded-2xl bg-white py-3 text-[16px] font-semibold text-black transition-colors disabled:opacity-60"
       >
         <AnimatePresence mode="wait" initial={false}>
           <motion.span

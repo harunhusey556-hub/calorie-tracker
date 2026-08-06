@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   getMealsForDay,
@@ -11,12 +11,24 @@ import {
 } from "@/lib/db";
 import CalorieRing from "./CalorieRing";
 
+// Local-midnight key so the day-rollover backstop only re-fetches when the
+// day has actually changed, not on every poll tick.
+function localDayKey(d: Date): number {
+  const start = new Date(d);
+  start.setHours(0, 0, 0, 0);
+  return start.getTime();
+}
+
 export default function TodayScreen({ refreshKey }: { refreshKey: number }) {
   const [total, setTotal] = useState(0);
   const [goal, setGoal] = useState(2000);
   const [meals, setMeals] = useState<Meal[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
+  // BUG-04: bumped by the resume/rollover listeners below to force the load
+  // effect to re-run — `refreshKey` alone only fires on external nav events
+  // (tab switch), never on midnight rollover or PWA background/foreground.
+  const [staleTick, setStaleTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,7 +57,38 @@ export default function TodayScreen({ refreshKey }: { refreshKey: number }) {
     return () => {
       cancelled = true;
     };
-  }, [refreshKey]);
+  }, [refreshKey, staleTick]);
+
+  // Re-fetch on PWA resume (visibilitychange), tab/window focus, and — as a
+  // backstop for an app left open and foregrounded straight through local
+  // midnight — a periodic check for day rollover. Without this, Today keeps
+  // showing whatever `new Date()` resolved to on the last mount/tab-switch,
+  // since db.ts's day-boundary functions are only ever called once per
+  // `refreshKey` change (confirmed: db.ts itself is not stateful/cached).
+  const dayKeyRef = useRef(localDayKey(new Date()));
+  useEffect(() => {
+    function refresh() {
+      setStaleTick((n) => n + 1);
+    }
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible") refresh();
+    }
+    function checkDayRollover() {
+      const now = localDayKey(new Date());
+      if (now !== dayKeyRef.current) {
+        dayKeyRef.current = now;
+        refresh();
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("focus", refresh);
+    const interval = setInterval(checkDayRollover, 60_000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("focus", refresh);
+      clearInterval(interval);
+    };
+  }, []);
 
   return (
     <div className="flex flex-col items-center gap-6 px-5 pb-4 pt-8">

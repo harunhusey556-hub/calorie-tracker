@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { addMeal, type MealItem } from "@/lib/db";
 import PhotoCapture, { type PhotoParseResult } from "./PhotoCapture";
@@ -21,8 +21,23 @@ export default function LogScreen({ onSaved }: { onSaved: () => void }) {
   const [photoBusy, setPhotoBusy] = useState(false);
   const [result, setResult] = useState<ParseResult | null>(null);
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const busy = status === "loading" || photoBusy;
+
+  // BUG-03 guard: an in-flight /api/parse-meal response is only applied if
+  // it's still the latest request AND the text hasn't changed since it was
+  // fired — otherwise the user edited the text before the stale response
+  // landed and applying it would show/save items that don't match what's on
+  // screen. Refs (not state) because the fetch callback closure needs the
+  // *live* value at response time, not the value at request time.
+  const requestIdRef = useRef(0);
+  const textRef = useRef(text);
+  useEffect(() => {
+    textRef.current = text;
+  }, [text]);
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   function switchMode(next: Mode) {
     if (next === mode || busy) return;
@@ -34,6 +49,11 @@ export default function LogScreen({ onSaved }: { onSaved: () => void }) {
 
   async function handleParseText() {
     if (!text.trim()) return;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const requestId = ++requestIdRef.current;
+    const requestText = text;
     setStatus("loading");
     setResult(null);
     setSaved(false);
@@ -41,13 +61,33 @@ export default function LogScreen({ onSaved }: { onSaved: () => void }) {
       const res = await fetch("/api/parse-meal", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text: requestText }),
+        signal: controller.signal,
       });
+      if (requestId !== requestIdRef.current) return; // superseded by a newer request
+      if (requestText !== textRef.current) {
+        // Text changed since this request was fired — discard the stale
+        // result instead of displaying/saving items that no longer match
+        // what's on screen. Re-enable the button so the user can re-parse.
+        setStatus("idle");
+        return;
+      }
       if (!res.ok) throw new Error("parse failed");
       const data: ParseResult = await res.json();
+      if (requestId !== requestIdRef.current) return;
+      if (requestText !== textRef.current) {
+        setStatus("idle");
+        return;
+      }
       setResult(data);
       setStatus("idle");
     } catch {
+      if (controller.signal.aborted) return;
+      if (requestId !== requestIdRef.current) return;
+      if (requestText !== textRef.current) {
+        setStatus("idle");
+        return;
+      }
       setStatus("error");
     }
   }
@@ -73,24 +113,32 @@ export default function LogScreen({ onSaved }: { onSaved: () => void }) {
     result.total_calories === 0;
 
   async function handleSave() {
-    if (!result || isPhotoDeadEnd) return;
+    // BUG-01 guard: `saving`/`saved` block re-entry from a double-tap firing
+    // handleSave twice before the button's `disabled` attribute commits.
+    if (!result || isPhotoDeadEnd || saving || saved) return;
+    setSaving(true);
     const summary = mode === "photo" ? result.items.map((i) => i.name).join(", ") || "Photo meal" : text;
-    await addMeal({
-      text: summary,
-      items: result.items,
-      total_calories: result.total_calories,
-      // Photo results carry "nvidia-vision"; the local schema only tracks
-      // AI-success vs. fallback, so normalize to the existing "nvidia" bucket.
-      source: result.source === "fallback" ? "fallback" : "nvidia",
-      timestamp: Date.now(),
-    });
-    setSaved(true);
-    setTimeout(() => {
-      setText("");
-      setResult(null);
-      setSaved(false);
-      onSaved();
-    }, 650);
+    try {
+      await addMeal({
+        text: summary,
+        items: result.items,
+        total_calories: result.total_calories,
+        // Photo results carry "nvidia-vision"; the local schema only tracks
+        // AI-success vs. fallback, so normalize to the existing "nvidia" bucket.
+        source: result.source === "fallback" ? "fallback" : "nvidia",
+        timestamp: Date.now(),
+      });
+      setSaved(true);
+      setTimeout(() => {
+        setText("");
+        setResult(null);
+        setSaved(false);
+        setSaving(false);
+        onSaved();
+      }, 650);
+    } catch {
+      setSaving(false);
+    }
   }
 
   return (
@@ -206,6 +254,7 @@ export default function LogScreen({ onSaved }: { onSaved: () => void }) {
             totalCalories={result.total_calories}
             source={result.source}
             saved={saved}
+            disabled={saving || saved}
             onSave={handleSave}
           />
         )}
