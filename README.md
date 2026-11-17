@@ -1,36 +1,44 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Calorie Tracker
 
-## Getting Started
+A mobile-first calorie tracker that understands meals in plain language and from photos.
 
-First, run the development server:
+Type "2 eggs, a slice of rye bread and coffee with milk", or take a picture of your plate, and the app estimates calories and macros with an AI vision/language model. All entries are stored locally on the device, so it also works offline.
+
+## Features
+
+- **Natural-language logging**: write what you ate, the AI turns it into items with calories
+- **Photo logging**: snap a meal photo and get an estimate
+- **Daily calorie ring** and history view
+- **Offline-first PWA**: installable on a phone, data stays on the device (IndexedDB)
+- **Finnish-friendly input**: handles comma decimals such as `0,5 l`
+- **Resilient AI calls**: primary model with automatic fallback and timeouts
+
+## Tech stack
+
+Next.js 14 · React · TypeScript · Tailwind CSS · Dexie (IndexedDB) · Framer Motion · NVIDIA NIM models
+
+## Quality
+
+- Unit and API tests with **Vitest** and Testing Library
+- End-to-end tests with **Playwright**, including offline mode
+- Input validation and value clamping on the API routes
+
+## Run locally
 
 ```bash
+npm install
+echo "NVIDIA_API_KEY=your-key" > .env.local
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+```bash
+npm test          # unit + API tests
+npm run test:e2e  # end-to-end tests
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Environment variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+| Variable | Purpose |
+|---|---|
+| `NVIDIA_API_KEY` | API key for NVIDIA NIM |
+| `NVIDIA_MODEL_TEXT` / `NVIDIA_MODEL_TEXT_FALLBACK` | Optional model overrides |
